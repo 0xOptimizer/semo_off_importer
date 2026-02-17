@@ -1,0 +1,47 @@
+# Credentials and Environment
+.env
+.venv/
+venv/
+ENV/
+env/
+
+# Data and Logs
+*.jsonl.gz
+*.jsonl
+import_state.json
+import_state.json.tmp
+import_errors.jsonl
+process_output.log
+nohup.out
+
+# Python System Files
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
+# Distribution / Packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
