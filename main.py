@@ -37,18 +37,10 @@ logging.basicConfig(
 )
 
 def run_preflight(conn):
-    logging.debug("Starting pre-flight checks...")
+    logging.debug("Verifying environment and database schema...")
     
     if not os.path.exists(FILE_PATH):
-        logging.critical(f"PRE-FLIGHT FAILED: Data file missing at {FILE_PATH}")
-        return False
-
-    try:
-        with gzip.open(FILE_PATH, 'rb') as f:
-            f.read(1024)
-        logging.debug("Data file is a valid GZIP and readable.")
-    except Exception as e:
-        logging.critical(f"PRE-FLIGHT FAILED: Cannot read GZIP file: {e}")
+        logging.critical(f"Data file missing at {FILE_PATH}")
         return False
 
     cursor = conn.cursor()
@@ -65,12 +57,18 @@ def run_preflight(conn):
     
     for col_name, dtype in columns:
         if 'char' in dtype.lower() and 'varying' not in dtype.lower() and 'text' not in dtype.lower():
-            logging.critical(f"PRE-FLIGHT FAILED: Column {col_name} is still {dtype}. Must be text.")
+            logging.critical(f"Column {col_name} is {dtype}. Run ALTER TABLE to change to TEXT.")
             return False
     
-    logging.info("PRE-FLIGHT PASSED: Environment, File, and Schema are ready.")
-    confirm = input("Proceed with import? (y/n): ")
-    return confirm.lower() == 'y'
+    logging.info("PRE-FLIGHT PASSED: Database schema is ready.")
+    
+    if sys.stdin.isatty():
+        try:
+            confirm = input("Proceed with 15GB import? (y/n): ")
+            return confirm.lower() == 'y'
+        except EOFError:
+            return True
+    return True
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -117,7 +115,7 @@ def parse_list(val):
 def insert_individual_rows(cursor, conn, buffers):
     local_success = 0
     local_fail = 0
-    logging.debug(f"Rolling back batch and attempting individual inserts...")
+    logging.debug("Switching to individual insertion mode for failed batch...")
     conn.rollback() 
     
     for i in range(len(buffers["products"])):
@@ -131,19 +129,23 @@ def insert_individual_rows(cursor, conn, buffers):
                 ON CONFLICT (code) DO NOTHING
             """, p)
             
-            for table, key in [("off_data_brands", "brands"), ("off_data_categories", "categories")]:
-                data = [b for b in buffers[key] if b[0] == code]
-                if data: execute_values(cursor, f"INSERT INTO {table} (product_code, {table.split('_')[-1][:-1]}) VALUES %s", data)
+            if buffers["brands"]:
+                b_data = [b for b in buffers["brands"] if b[0] == code]
+                if b_data: execute_values(cursor, "INSERT INTO off_data_brands (product_code, brand) VALUES %s", b_data)
             
-            nuts = [n for n in buffers["nutriments"] if n[0] == code]
-            if nuts: execute_values(cursor, "INSERT INTO off_data_nutriments (product_code, nutrient_id, value_100g) VALUES %s", nuts)
+            if buffers["categories"]:
+                c_data = [c for c in buffers["categories"] if c[0] == code]
+                if c_data: execute_values(cursor, "INSERT INTO off_data_categories (product_code, category) VALUES %s", c_data)
+
+            if buffers["nutriments"]:
+                n_data = [n for n in buffers["nutriments"] if n[0] == code]
+                if n_data: execute_values(cursor, "INSERT INTO off_data_nutriments (product_code, nutrient_id, value_100g) VALUES %s", n_data)
             
             conn.commit()
             local_success += 1
         except psycopg2.Error as e:
             conn.rollback()
             local_fail += 1
-            logging.warning(f"Product {code} failed individual insert: {e}")
             log_single_error(code, e)
             
     return local_success, local_fail
@@ -153,12 +155,12 @@ def process_import():
     lines_processed = state["lines_processed"]
     success_count = state["success_count"]
     fail_count = state["fail_count"]
+    total_size = os.path.getsize(FILE_PATH)
     
     conn = None
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         if not run_preflight(conn):
-            logging.critical("Pre-flight check failed or aborted by user.")
             return
 
         cursor = conn.cursor()
@@ -166,8 +168,9 @@ def process_import():
 
         with gzip.open(FILE_PATH, 'rt', encoding='utf-8') as f:
             if lines_processed > 0:
-                logging.debug(f"Skipping {lines_processed} lines...")
-                for _ in range(lines_processed): next(f)
+                logging.info(f"Fast-forwarding to line {lines_processed}...")
+                for _ in range(lines_processed):
+                    next(f)
 
             for line in f:
                 lines_processed += 1
@@ -216,10 +219,10 @@ def process_import():
                         if buffers["nutriments"]: execute_values(cursor, "INSERT INTO off_data_nutriments (product_code, nutrient_id, value_100g) VALUES %s", buffers["nutriments"])
                         conn.commit()
                         success_count += len(buffers["products"])
-                    except psycopg2.Error as e:
-                        s, f_count = insert_individual_rows(cursor, conn, buffers)
+                    except psycopg2.Error:
+                        s, f_c = insert_individual_rows(cursor, conn, buffers)
                         success_count += s
-                        fail_count += f_count
+                        fail_count += f_c
 
                     state.update({"lines_processed": lines_processed, "success_count": success_count, "fail_count": fail_count})
                     save_state(state)
@@ -230,9 +233,9 @@ def process_import():
                     logging.info(f"Progress: {progress:.2f}% | Processed: {lines_processed} | Success: {success_count} | Fail: {fail_count}")
 
     except KeyboardInterrupt:
-        logging.warning("Interrupted.")
+        logging.warning("User interrupted.")
     except Exception as e:
-        logging.critical(f"Process Failure: {e}")
+        logging.critical(f"FATAL: {e}")
     finally:
         if conn: conn.close()
 
