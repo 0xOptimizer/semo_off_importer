@@ -100,7 +100,10 @@ def log_single_error(code, error_reason):
     except Exception as e:
         logging.error(f"Failed to write to error log: {e}")
 
-def clean_str(val): return val.strip() if isinstance(val, str) and val.strip() else None
+def clean_str(val):
+    if isinstance(val, str) and val.strip():
+        return val.strip().replace('\0', '')
+    return None
 def clean_int(val): 
     try: return int(val)
     except (ValueError, TypeError): return None
